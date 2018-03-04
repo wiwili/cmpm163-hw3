@@ -1,0 +1,421 @@
+
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>demo - shader</title>
+		<meta charset="utf-8">
+		<style>
+			body {
+			  margin: 0px;
+				overflow: hidden;
+			}
+		</style>
+	</head>
+	<body>
+
+		<div id="container"></div>
+
+    <script src="js/three.js"></script>
+	<script src="js/OrbitControls.js"></script>
+	<script src="js/dat.gui.min.js"></script>
+		
+
+    <script id="vertexShader" type="x-shader/x-vertex">
+
+	uniform mat4 modelMatrix;
+	uniform mat4 viewMatrix;
+    uniform mat4 projectionMatrix;
+
+    attribute vec3 position;
+	attribute vec2 uv;
+	attribute vec3 normal;
+	
+	varying vec2 vUv;
+	
+    precision mediump float;
+	//precision mediump vec2;
+
+
+	void main() {
+		vUv = uv;
+       
+       	gl_Position = projectionMatrix  * viewMatrix * modelMatrix  * vec4( position, 1.0 );
+        }
+
+	</script>
+
+	<script id="fragmentShader" type="x-shader/x-fragment">
+
+
+precision mediump float;	
+
+uniform vec2 resolution;
+uniform float time;	
+uniform float shininess;
+//uniform vec3 camera;
+
+// Using jlfwong's ray marching tutorial
+
+const int MAX_MARCHING_STEPS = 255;
+const float MIN_DIST = 0.0;
+const float MAX_DIST = 100.0;
+const float EPSILON =  0.0001;
+
+// SDF primitives
+float intersectSDF(float distA, float distB)
+{
+	return max(distA, distB);
+}
+
+float unionSDF(float distA, float distB)
+{
+	return min(distA, distB);
+}
+
+float differenceSDF(float distA, float distB)
+{
+	return max(distA, -distB);
+}
+
+// Render a cube
+float cubeSDF(vec3 p, vec3 b)
+{
+	vec3 d = abs(p)-b;
+	return min(max(d.x,max(d.y,d.z)),0.0 + length(max(d,0.0)));
+}
+
+// Render a sphere
+float sphereSDF(vec3 p, float r)
+{
+	return length(p) - r;
+}
+
+// Capped cylinder signed exact
+float sdCappedCylinder(vec3 p, vec2 h)
+{
+	vec2 d = abs(vec2(length(p.xz),p.y)) - h;
+	return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+}
+
+float sdCone(vec3 p, vec2 c)
+{
+	// c must be normalized
+	float q = length(p.xy);
+	return dot(c,vec2(q,p.z));
+}
+
+float sdEllipsoid(vec3 p, vec3 r)
+{
+	return (length(p/r)-1.0)*min(min(r.x,r.y),r.z);
+}
+
+float sdTorus(vec3 p, vec2 t)
+{
+	vec2 q = vec2(length(p.xz)-t.x,p.y);
+	return length(q)-t.y;
+}
+
+// Rotation around X
+mat3 rotateX(float theta){
+	float c = cos(theta);
+	float s = sin(theta);
+	return mat3(
+		vec3(1,0,0),
+		vec3(0,c,-s),
+		vec3(0,s,c)
+		);
+}
+
+// Rotation around Y
+mat3 rotateY(float theta){
+	float c = cos(theta);
+	float s = sin(theta);
+	return mat3(
+		vec3(c,0,s),
+		vec3(0,1,0),
+		vec3(-s,0,c)
+		);
+}
+
+
+// Rotation around Z
+mat3 rotateZ(float theta){
+	float c = cos(theta);
+	float s = sin(theta);
+	return mat3(
+		vec3(c,-s,0),
+		vec3(s,c,0),
+		vec3(0,0,1)
+		);
+}
+
+
+
+// SDF describing the scene
+float sceneSDF(vec3 p){	
+
+	// shape 1
+	vec3 rotationP = rotateY(time)*p;
+	
+
+	float sphereDist = sphereSDF(rotateX(time)*rotationP*vec3(sin(time))/1.2,0.4) *1.2;
+	float cubeDist = cubeSDF(rotateX(time)*rotationP,vec3(0.6,0.6,0.6))*1.2;
+	float combine = intersectSDF(cubeDist, sphereDist);
+	
+	float cylinderDist = sdCappedCylinder(rotateX(time)*rotationP/1.2,vec2(0.3,0.3))*1.2;
+	
+	float hole = unionSDF(combine, cylinderDist); 
+	
+	
+	float torus = sdTorus(rotateZ(time*3.0)*rotateX(-time*3.0) * rotationP, vec2(0.5,0.1));
+	float torus2 = sdTorus(rotateZ(-time*3.0)*rotateX(-time*3.0) * rotateX(radians(90.0))*rotationP, vec2(0.5,0.1));
+	float torusCombo = unionSDF(torus,torus2);
+
+	float ring = differenceSDF(hole, torusCombo);
+	float sphereCenter = sphereSDF(p,abs(0.5*cos(time*3.0)));
+	
+	//float central = unionSDF( ring, sphereCenter);
+	
+	return ring;
+}
+
+
+//Returns the shortest distance from eyepoint to the scene surface along the ray direction
+float shortestDistanceToSurface(vec3 eye, vec3 marchDirection, float start, float end)
+{
+	float depth = start;
+	for (int i = 0; i < MAX_MARCHING_STEPS; i++)
+	{
+		float dist = sceneSDF(eye + depth * marchDirection);
+		if (dist <EPSILON)
+		{
+			return depth;
+		}
+		depth += dist;
+		if (depth >= end)
+		{
+			return end;
+		}
+	}
+	return end;
+}
+
+// Normalized direction to march in from the eye point
+vec3 rayDirection(float fieldOfView, vec2 size, vec2 fragCoord)
+{
+	vec2 xy = fragCoord - size / 2.0;
+	float z = size.y / tan(radians(fieldOfView)/2.0);
+	return normalize(vec3(xy,-z));
+}
+
+// Use the gradient of the SDF to estimate the normal on the surface at point p
+vec3 estimateNormal (vec3 p)
+{
+	return normalize (vec3(
+		sceneSDF(vec3(p.x + EPSILON, p.y, p.z)) - sceneSDF(vec3(p.x-EPSILON,p.y,p.z)),
+		sceneSDF(vec3(p.x, p.y + EPSILON, p.z)) - sceneSDF(vec3(p.x,p.y-EPSILON,p.z)),
+		sceneSDF(vec3(p.x, p.y, p.z + EPSILON)) - sceneSDF(vec3(p.x,p.y,p.z - EPSILON))
+	));
+
+}
+
+// Light contribution for a single point light
+// k_d - diffuse color
+// k_s - specular color
+// k_a - ambient color
+// alpha - shininess
+vec3 phongContribForLight(vec3 k_d, vec3 k_s, float alpha, vec3 p, vec3 eye, vec3 lightPos, vec3 lightIntensity)
+{
+	vec3 N = estimateNormal (p);
+	vec3 L = normalize(lightPos - p);
+	vec3 V = normalize(eye - p);
+	vec3 R = normalize(reflect(-L,N));
+	
+	float dotLN = dot(L,N);
+	float dotRV = dot(R,V);
+	if (dotLN < 0.0)
+	{
+		// light is not visible from this point on the surface
+		return vec3(0.0,0.0,0.0);
+	}
+	if (dotRV < 0.0)
+	{
+		return lightIntensity * (k_d * dotLN);
+	}
+	return lightIntensity * (k_d * dotLN + k_s * pow(dotRV,alpha));
+}
+
+// Phone Lighting
+// return vec3 is the RGB color of that point after lighting
+vec3 phongIllumination(vec3 k_a, vec3 k_d, vec3 k_s, float alpha, vec3 p, vec3 eye)
+{
+	const vec3 ambientLight = 0.5 * vec3(1.0,1.0,1.0);
+	vec3 color = ambientLight * k_a;
+	
+	// Manage lights here
+	vec3 light1Pos = vec3(4.0 * sin(time),2.0, 4.0*cos(time));
+	vec3 light1Intensity = vec3(0.4,0.4,0.4);
+	color += phongContribForLight(k_d,k_s,alpha,p,eye,light1Pos,light1Intensity);
+	
+	return color;
+}
+
+// Camera
+// Return a transform matrix that will transform a ray from view space to world coordinates
+// Assumes the center of the camera is alligned with z axis in view space when calculating the ray marching direction
+mat4 viewMatrix(vec3 eye, vec3 center, vec3 up)
+{
+	vec3 f = normalize(center - eye);
+	vec3 s = normalize(cross(f,up));
+	vec3 u = cross(s,f);
+	return mat4(
+		vec4(s,0.0),
+		vec4(u,0.0),
+		vec4(-f,0.0),
+		vec4(0.0,0.0,0.0,1.0)
+	);
+}
+
+
+// raymarch loop
+void main(){
+	vec3 viewDir = rayDirection(45.0, resolution, gl_FragCoord.xy);
+	vec3 eye = vec3(8.0,6.0,7.0);
+	
+	mat4 viewToWorld = viewMatrix(eye,vec3(0.0,0.0,0.0), vec3(0.0,1.0,0.0));
+	vec3 worldDir = (viewToWorld * vec4(viewDir,0.0)).xyz;
+	
+	float dist = shortestDistanceToSurface(eye,worldDir,MIN_DIST,MAX_DIST);
+	
+	if ( dist > MAX_DIST - EPSILON){
+		gl_FragColor = vec4(0.0,0.0,0.0,0.0);
+		return;
+	}
+
+	// closest point on the surface to eye along the ray
+	vec3 p = eye + dist * worldDir;
+	vec3 K_a = (estimateNormal(p) + vec3(1.0))/2.0;
+	vec3 K_d = (estimateNormal(p) + vec3(1.0))/2.0;
+	vec3 K_s = vec3(1.0,1.0,1.0);
+	vec3 color = phongIllumination(K_a,K_d,K_s,shininess,p,eye);
+	
+	gl_FragColor = vec4(color, 1.0);
+}
+
+	</script>
+
+	<script>
+
+
+var container;
+
+var camera, scene, renderer, mesh, controls;
+var gui = new dat.GUI({width:350});
+
+var vs = document.getElementById( 'vertexShader' ).textContent;
+var fs = document.getElementById( 'fragmentShader' ).textContent;
+
+	var mouseX = 0.0;
+	var mouseY = 0.0;
+
+init();
+animate();
+
+function init() {
+
+	container = document.getElementById( 'container' );
+
+	var width = window.innerWidth;
+	var height = window.innerHeight;
+
+
+	//camera = new THREE.OrthographicCamera( width / -2, width / 2, height / 2, height / -2, 0.1, 1000 );
+	camera = new THREE.OrthographicCamera (-1,1,1,-1,1/Math.pow(2,53),1);
+	controls = new THREE.OrbitControls(camera);
+	
+	scene = new THREE.Scene();
+
+	// options to pass, mostly to test some variables
+	options = {
+		shininess: 10.0,
+		timeScale:0.0004,
+		camera:camera.position
+		};
+
+	// geometry
+
+	var geometry = new THREE.PlaneGeometry( width, height, 1, 1 );
+	
+	// material
+
+	var uniforms =  {
+		resolution: { type: "v2", value: new THREE.Vector3(width, height) },
+		shininess:{type:"f", value:options.shininess},
+		camera:{type:"v3",value:camera.position},
+		time:{type:"f",value:0.0}
+	};
+
+
+	var material = new THREE.RawShaderMaterial( {
+
+		uniforms: uniforms,
+		vertexShader: vs,
+		fragmentShader: fs,
+
+	} );
+
+
+	mesh = new THREE.Mesh( geometry, material );
+	scene.add( mesh );
+
+
+	renderer = new THREE.WebGLRenderer();
+	renderer.setSize( window.innerWidth, window.innerHeight );
+	container.appendChild( renderer.domElement );
+	
+	gui.add(options,"shininess",0,15).onChange(function(value){
+		mesh.material.uniforms.shininess.value = value;
+	});
+	gui.add(options,"timeScale",0,0.0020).step(0.0001);
+	
+
+
+        window.addEventListener( 'resize', onWindowResize, true );
+	
+			}
+
+			function onWindowResize( event ) {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				mesh.material.uniforms.resolution.value = new THREE.Vector2(window.innerWidth, window.innerHeight);
+			}
+			
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+				controls.update();
+				render();
+				
+				
+
+			}
+
+			function render() {
+				var time = performance.now();
+				mesh.material.uniforms.time.value = time * options.timeScale;
+				
+				renderer.render( scene, camera );
+			}
+
+
+
+
+		</script>
+
+	</body>
+</html>
+
